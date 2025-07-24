@@ -1,0 +1,12 @@
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+CREATE TABLE calls (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payload JSONB NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  lastError TEXT,
+  createdAt TIMESTAMP NOT NULL DEFAULT NOW(),
+  startedAt TIMESTAMP,
+  endedAt TIMESTAMP
+);
