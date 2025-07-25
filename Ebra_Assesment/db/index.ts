@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import 'dotenv/config';
 
 export interface Call {
   id: string;

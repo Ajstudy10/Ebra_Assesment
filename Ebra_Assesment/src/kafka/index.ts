@@ -1,4 +1,5 @@
 import { Kafka } from 'kafkajs';
+import 'dotenv/config';
 
 const kafka = new Kafka({
   clientId: 'ai-calls',

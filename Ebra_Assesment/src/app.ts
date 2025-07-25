@@ -2,6 +2,7 @@ import express from 'express';
 import { db } from '../db/index.js';
 import { kafkaClient } from './kafka/index.js';
 import { callbackRouter } from './callbacks.js';
+import 'dotenv/config';
 
 const app = express();
 app.use(express.json());
