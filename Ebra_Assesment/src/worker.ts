@@ -1,6 +1,7 @@
 import { db } from '../db/index.js';
 import { kafkaClient } from './kafka/index.js';
 import { redisClient } from './redis/index.js';
+import 'dotenv/config';
 
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [5, 10, 20]; // 5s, 10s, 20s (shorter for demo)

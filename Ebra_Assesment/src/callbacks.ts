@@ -3,6 +3,7 @@ import express from 'express';
 import crypto from 'crypto';
 import { db } from '../db/index.js';
 import { redisClient } from './redis/index.js';
+import 'dotenv/config';
 
 const router = express.Router();
 
