@@ -1,114 +1,116 @@
 import express from 'express';
-import initDb from '../db/init';
-import pool from '../db/index';
+import { db } from '../db/index.js';
+import { kafkaClient } from './kafka/index.js';
+import { callbackRouter } from './callbacks.js';
+
 const app = express();
 app.use(express.json());
 
-(async () => {
-  await initDb();
+// Mount callbacks
+app.use('/callbacks', callbackRouter);
 
-    app.post('/calls', async (req, res) => {
-  const { to, scriptId, metadata } = req.body;
-
-  // Basic validation
-  if (!to || !scriptId) {
-    return res.status(400).json({ error: "'to' and 'scriptId' are required." });
-  }
-
-  const payload = { to, scriptId, metadata };
-
+// 1. Create Call
+app.post('/calls', async (req, res) => {
   try {
-    const result = await pool.query(
-      `INSERT INTO calls (payload, status, attempts, createdAt)
-       VALUES ($1, 'PENDING', 0, NOW())
-       RETURNING *`,
-      [payload]
+    const { to, scriptId, metadata } = req.body;
+    
+    if (!to || !scriptId) {
+      return res.status(400).json({ error: 'Missing to or scriptId' });
+    }
+
+    // Check for existing active call to same number
+    const existing = await db.query(
+      "SELECT id FROM calls WHERE payload->>'to' = $1 AND status = 'IN_PROGRESS'",
+      [to]
     );
-    res.status(201).json(result.rows[0]);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'Call already in progress to this number' });
+    }
+
+    // Create call
+    const call = await db.createCall({ to, scriptId, metadata });
+    
+    // Queue for processing
+    await kafkaClient.queueCall(call.id);
+    
+    res.status(201).json(call);
+  } catch (error) {
+    console.error('Error creating call:', error);
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
+// 2. Get Call
 app.get('/calls/:id', async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const result = await pool.query(
-      'SELECT * FROM calls WHERE id = $1',
-      [id]
-    );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Call not found.' });
-    }
-    res.json(result.rows[0]);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const call = await db.getCall(req.params.id);
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    res.json(call);
+  } catch (error) {
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
+// 3. Update Call
 app.patch('/calls/:id', async (req, res) => {
-  const { id } = req.params;
-  const { to, scriptId, metadata } = req.body;
-
-  // Build new payload
-  const newPayload = { to, scriptId, metadata };
-
   try {
-    // Only update if status is 'PENDING'
-    const result = await pool.query(
-      `UPDATE calls
-       SET payload = $1
-       WHERE id = $2 AND status = 'PENDING'
-       RETURNING *`,
-      [newPayload, id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(400).json({ error: "Call not found or not in 'PENDING' status." });
+    const call = await db.getCall(req.params.id);
+    if (!call) return res.status(404).json({ error: 'Call not found' });
+    
+    if (call.status !== 'PENDING') {
+      return res.status(409).json({ error: 'Can only update PENDING calls' });
     }
 
-    res.json(result.rows[0]);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    const updated = await db.updateCall(req.params.id, req.body);
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
+// 4. List Calls
 app.get('/calls', async (req, res) => {
-  const { status, page = 1, limit = 10 } = req.query;
-
-  const validStatuses = ['PENDING', 'IN_PROGRESS', 'FAILED', 'COMPLETED'];
-  if (status && !validStatuses.includes(String(status))) {
-    return res.status(400).json({ error: 'Invalid status value.' });
-  }
-
-  const offset = (Number(page) - 1) * Number(limit);
-
   try {
-    let result;
+    const { status, page = '1', limit = '50' } = req.query;
+    const offset = (parseInt(page as string) - 1) * parseInt(limit as string);
+    
     if (status) {
-      result = await pool.query(
-        `SELECT * FROM calls
-         WHERE status = $1
-         ORDER BY createdAt DESC
-         LIMIT $2 OFFSET $3`,
-        [status, Number(limit), offset]
-      );
+      const calls = await db.getCallsByStatus(status as string, parseInt(limit as string), offset);
+      res.json({ calls });
     } else {
-      result = await pool.query(
-        `SELECT * FROM calls
-         ORDER BY createdAt DESC
-         LIMIT $1 OFFSET $2`,
-        [Number(limit), offset]
+      const result = await db.query(
+        'SELECT * FROM calls ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+        [limit, offset]
       );
+      const calls = result.rows.map(row => db.mapRow(row));
+      res.json({ calls });
     }
-    res.json(result.rows);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal error' });
   }
 });
 
-  app.listen(3000, () => {
-    console.log('🚀 Server running on http://localhost:3000');
+// 5. Metrics
+app.get('/metrics', async (req, res) => {
+  try {
+    const metrics = await db.getMetrics();
+    res.json(metrics);
+  } catch (error) {
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+
+async function start() {
+  await kafkaClient.connect();
+  app.listen(PORT, () => {
+    console.log(`API running on port ${PORT}`);
   });
-})();
+}
+
+start().catch(console.error);
+
+export { app };
