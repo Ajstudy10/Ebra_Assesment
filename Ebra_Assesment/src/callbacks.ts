@@ -103,14 +103,13 @@ const verifyWebhookSignature = (req: RequestWithRawBody, res: express.Response, 
 router.use('/call-status', express.raw({ type: 'application/json' }));
 router.use('/call-status', captureRawBody);
 
-// Main callback endpoint with authentication
 router.post('/call-status', verifyWebhookSignature, async (req: RequestWithRawBody, res) => {
   try {
-    // Parse the JSON body (it's raw at this point due to middleware)
+    // Parse the JSON body
     const body = JSON.parse(req.rawBody?.toString() || '{}');
     const { callId, status, completedAt, durationSec, failureReason } = body;
     
-    console.log(`📞 Authenticated webhook received for ${callId}: ${status}`);
+    console.log(`📞 [Webhook] Received for external ID ${callId}: ${status}`);
 
     // Validate required fields
     if (!callId || !status) {
@@ -140,10 +139,19 @@ router.post('/call-status', verifyWebhookSignature, async (req: RequestWithRawBo
     // Check if call is in the right state for updates
     if (call.status !== 'IN_PROGRESS') {
       console.log(`⚠️ Call ${call.id} is not IN_PROGRESS (current: ${call.status})`);
-      // Return 200 to prevent webhook retries for already processed calls
-      return res.json({ 
-        message: 'Call already processed',
-        currentStatus: call.status
+      
+      // If already completed/failed, don't error - webhook might be duplicate
+      if (['COMPLETED', 'FAILED'].includes(call.status)) {
+        return res.json({ 
+          message: 'Call already processed',
+          currentStatus: call.status
+        });
+      }
+      
+      // If PENDING, this is weird but not an error
+      return res.status(400).json({
+        error: 'Invalid state',
+        message: `Call is in ${call.status} state, expected IN_PROGRESS`
       });
     }
 
@@ -168,18 +176,18 @@ router.post('/call-status', verifyWebhookSignature, async (req: RequestWithRawBo
       throw new Error('Failed to update call in database');
     }
 
-    // Release concurrency slot
-    await redisClient.endCall(call.id);
+    // **CRITICAL FIX**: Release both concurrency slot AND entity lock
+    await redisClient.endCall(call.id, call.payload.to);
 
     // Log success with details
     const duration = durationSec ? ` (${durationSec}s)` : '';
-    console.log(`✅ Call ${call.id} updated: ${call.status} → ${finalStatus}${duration}`);
+    console.log(`✅ [Complete] Call ${call.id}: IN_PROGRESS → ${finalStatus}${duration}`);
     
-    // Log for monitoring/analytics
+    // Enhanced logging for monitoring
     if (finalStatus === 'COMPLETED') {
-      console.log(`📈 SUCCESS: ${call.payload.to} (${call.payload.scriptId})${duration}`);
+      console.log(`📈 SUCCESS: ${call.payload.to} script:${call.payload.scriptId}${duration}`);
     } else {
-      console.log(`📉 FAILED: ${call.payload.to} - ${updateData.lastError}`);
+      console.log(`📉 FAILED: ${call.payload.to} script:${call.payload.scriptId} reason:${updateData.lastError}`);
     }
 
     // Return success response

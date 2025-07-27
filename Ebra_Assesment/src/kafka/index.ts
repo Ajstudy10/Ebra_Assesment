@@ -7,7 +7,11 @@ const kafka = new Kafka({
 });
 
 const producer = kafka.producer();
-const consumer = kafka.consumer({ groupId: 'call-workers' });
+const consumer = kafka.consumer({ 
+  groupId: 'call-workers',
+  // Important: Control concurrency at Redis level, not Kafka level
+  maxInFlightRequests: 50 // Allow more in-flight requests
+});
 
 export const kafkaClient = {
   async connect() {
@@ -21,18 +25,44 @@ export const kafkaClient = {
     const topic = isRetry ? 'call-retries' : 'call-requests';
     await producer.send({
       topic,
-      messages: [{ key: callId, value: JSON.stringify({ callId, isRetry }) }]
+      messages: [{ 
+        key: callId, 
+        value: JSON.stringify({ 
+          callId, 
+          isRetry,
+          timestamp: Date.now() 
+        }) 
+      }]
     });
   },
 
-  // Start processing calls
+  // Start processing calls - Let Redis handle concurrency, process messages concurrently
   async startWorker(handler: (callId: string) => Promise<void>) {
     await consumer.run({
-      eachMessage: async ({ message }) => {
-        if (message.value) {
-          const { callId } = JSON.parse(message.value.toString());
-          await handler(callId);
-        }
+      eachBatchAutoResolve: false, // Manual commit for better control
+      partitionsConsumedConcurrently: 10, // Process multiple partitions
+      eachBatch: async ({ batch, resolveOffset, heartbeat }) => {
+        // Process messages concurrently - Redis will handle the limiting
+        const tasks = batch.messages.map(async (message) => {
+          try {
+            if (message.value) {
+              const { callId } = JSON.parse(message.value.toString());
+              await handler(callId);
+            }
+            
+            // Commit offset after successful processing
+            resolveOffset(message.offset);
+            
+          } catch (err) {
+            console.error('❌ Error processing call:', err);
+            // Still resolve offset to avoid reprocessing
+            resolveOffset(message.offset);
+          }
+        });
+
+        // Process all messages in batch concurrently
+        await Promise.all(tasks);
+        await heartbeat();
       },
     });
   },

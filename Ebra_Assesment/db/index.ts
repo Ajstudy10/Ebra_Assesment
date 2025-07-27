@@ -72,19 +72,27 @@ export const db = {
     );
     return result.rows.map(row => this.mapRow(row));
   },
-
+async fetchCallById(callId: string) {
+  const result = await this.query(
+    'SELECT * FROM calls WHERE id = $1 AND status = $2',
+    [callId, 'PENDING']
+  );
+  return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
+},
   async fetchPendingCall(): Promise<Call | null> {
     const result = await pool.query(`
-      UPDATE calls 
+      UPDATE calls
       SET status = 'IN_PROGRESS', started_at = NOW(), attempts = attempts + 1
       WHERE id = (
-        SELECT id FROM calls 
-        WHERE status = 'PENDING' 
-        AND (payload->>'to') NOT IN (
+        SELECT id
+        FROM calls
+        WHERE status = 'PENDING'
+        AND payload->>'to' NOT IN (
           SELECT payload->>'to' FROM calls WHERE status = 'IN_PROGRESS'
         )
-        ORDER BY created_at 
+        ORDER BY created_at
         LIMIT 1
+        FOR UPDATE SKIP LOCKED
       )
       RETURNING *
     `);
